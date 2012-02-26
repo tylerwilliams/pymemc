@@ -4,7 +4,7 @@ import logging
 import collections
 import contextlib
 import pkg_resources
-import zlib
+
 try:
     import cPickle as pickle
 except ImportError:
@@ -13,7 +13,10 @@ except ImportError:
 import chash
 import threadpool
 
-__version__ = pkg_resources.require("pymc")[0].version
+try:
+    __version__ = pkg_resources.require("pymc")[0].version
+except pkg_resources.DistributionNotFound:
+    __version__ = "0.0.0"
 
 __all__ = [
     'Client',
@@ -202,7 +205,12 @@ def _id(opcode, key, opaque, expire, cas, delta, initial):
             key,                # key
         )
     ]
-            
+
+# TODO: yada yada yada, if you send too much without receiving 
+# the socket will eventually block. You can see this if you do
+# a multiget with a very large (~100K) number of keys. I guess
+# the fix is to use non-blocking sockets and do some reads when
+# you hit EWOULDBLOCK. I'm waiting on that for now.
 def socksend(sock, lst):
     sock.sendall(''.join(lst))
 
@@ -242,7 +250,7 @@ class Client(object):
         """
         Create a new instance of the pymc client.
         
-        >>> c = Client(['localhost:11211'])
+        >>> c = Client('localhost:11211')
         >>> c.flush_all()
         True
         """
@@ -331,7 +339,7 @@ class Client(object):
         """
         Close the connections to all servers.
         
-        >>> c = Client(['localhost:11211'])
+        >>> c = Client('localhost:11211')
         >>> c.close()
         """
         self.quit()
@@ -464,7 +472,7 @@ class Client(object):
         """
         The get command returns the value for a single key.
         
-        >>> c = Client(['localhost:11211'])
+        >>> c = Client('localhost:11211')
         >>> c.set('foo', 'bar')
         True
         >>> c.get('foo')
@@ -479,9 +487,11 @@ class Client(object):
         The get_multi command returns a dictionary mapping found keys to their
         values. Keys will be omitted if their value is not found.
         
-        >>> c = Client(['localhost:11211'])
+        >>> c = Client('localhost:11211')
         >>> c.set_multi({'a':1, 'b':2})
         []
+        >>> c.get_multi(['a', 'b'])
+        {'a': 1, 'b': 2}
         """
         socket_fn = lambda key,opaque: _gd(M._getq, key, opaque, 0)
         last_socket_fn = lambda key,opaque: _gd(M._get, key, opaque, 0)
@@ -492,7 +502,7 @@ class Client(object):
         """
         The set command sets a single key/val.
         
-        >>> c = Client(['localhost:11211'])
+        >>> c = Client('localhost:11211')
         >>> c.set('bar', 'baz')
         True
         """
@@ -505,7 +515,7 @@ class Client(object):
         The set_multi command returns a list of keys that could not be set, or
         an empty list if all keys were successfully set.
         
-        >>> c = Client(['localhost:11211'])
+        >>> c = Client('localhost:11211')
         >>> c.set_multi({'c':3, 'd':4})
         []
         """
@@ -520,7 +530,7 @@ class Client(object):
         The add command sets a single key.
         Add MUST fail if the item already exists.
         
-        >>> c = Client(['localhost:11211'])
+        >>> c = Client('localhost:11211')
         >>> c.set('already_added', 'val')
         True
         >>> c.add('newly_added', 'val')
@@ -538,7 +548,7 @@ class Client(object):
         The add_multi command returns a list of keys that could not be added, or
         an empty list if all keys were successfully added.
         
-        >>> c = Client(['localhost:11211'])
+        >>> c = Client('localhost:11211')
         >>> c.add_multi({'e':5, 'f':6})
         []
         >>> c.add_multi({'e':5, 'f':6})
@@ -555,7 +565,7 @@ class Client(object):
         The replace command replaces a single key.
         Replace MUST fail if the item doesn't exist.
         
-        >>> c = Client(['localhost:11211'])
+        >>> c = Client('localhost:11211')
         >>> c.set('replace_me', 'val')
         True
         >>> c.replace('missing', 'newval')
@@ -572,7 +582,7 @@ class Client(object):
         The replace_multi command returns a list of keys that could not be
         replaced, or an empty list if all keys were successfully replaced.
 
-        >>> c = Client(['localhost:11211'])
+        >>> c = Client('localhost:11211')
         >>> c.set_multi({'g':7, 'h':8})
         []
         >>> c.replace_multi({'g':5, 'h':6})
@@ -590,7 +600,7 @@ class Client(object):
         The delete command removes the value for a single key.
         True is returned on success, or False if the key was missing.
         
-        >>> c = Client(['localhost:11211'])
+        >>> c = Client('localhost:11211')
         >>> c.set('delete_me', 'val')
         True
         >>> c.delete('missing')
@@ -610,7 +620,7 @@ class Client(object):
         be removed, or an empty list if all were successfully
         removed.
 
-        >>> c = Client(['localhost:11211'])
+        >>> c = Client('localhost:11211')
         >>> c.set_multi({'i':9, 'j':10})
         []
         >>> c.delete_multi(['i', 'j'])
@@ -655,7 +665,7 @@ class Client(object):
         Increment key by the specified amount. If the key does
         not exist, create it with the value of initial.
         
-        >>> c = Client(['localhost:11211'])
+        >>> c = Client('localhost:11211')
         >>> c.incr('incr', initial=1)
         1
         >>> c.incr('incr')
@@ -678,7 +688,7 @@ class Client(object):
         Decrement key by the specified amount. If the key does
         not exist, create it with the value of initial.
         
-        >>> c = Client(['localhost:11211'])
+        >>> c = Client('localhost:11211')
         >>> c.decr('decr', initial=10)
         10
         >>> c.decr('decr')
@@ -701,7 +711,7 @@ class Client(object):
         The append command will prepend the specified value to
         the requested key.
         
-        >>> c = Client(['localhost:11211'])
+        >>> c = Client('localhost:11211')
         >>> c.set('app', 'aft')
         True
         >>> c.append('app', 'er')
@@ -718,7 +728,7 @@ class Client(object):
         The prepend command will prepend the specified value to
         the requested key.
         
-        >>> c = Client(['localhost:11211'])
+        >>> c = Client('localhost:11211')
         >>> c.set('pre', 'fix')
         True
         >>> c.prepend('pre', 'pre')
@@ -734,7 +744,7 @@ class Client(object):
         """
         The quit command closes the remote socket.
 
-        >>> c = Client(['localhost:11211'])
+        >>> c = Client('localhost:11211')
         >>> c.quit()
         True
         """
@@ -750,7 +760,7 @@ class Client(object):
         The flush command flushes all data the DB. Optionally this will happen
         after `expire` seconds.
 
-        >>> c = Client(['localhost:11211'])
+        >>> c = Client('localhost:11211')
         >>> c.flush_all()
         True
         """
@@ -765,7 +775,7 @@ class Client(object):
         """
         The stats command returns all statistics from the server.
 
-        >>> c = Client(['localhost:11211'])
+        >>> c = Client('localhost:11211')
         >>> c.stats() #doctest: +ELLIPSIS
         {...
         """
@@ -797,7 +807,7 @@ class Client(object):
         The noop command Flushes outstanding getq/getkq's and can be used
         as a keep-alive.
 
-        >>> c = Client(['localhost:11211'])
+        >>> c = Client('localhost:11211')
         >>> c.noop()
         True
         """
@@ -812,7 +822,7 @@ class Client(object):
         """
         The version command returns the server's version string.
 
-        >>> c = Client(['localhost:11211'])
+        >>> c = Client('localhost:11211')
         >>> c.version() #doctest: +ELLIPSIS
         {'...
         """
