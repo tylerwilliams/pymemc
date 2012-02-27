@@ -4,6 +4,7 @@ import logging
 import collections
 import contextlib
 import pkg_resources
+import itertools
 
 try:
     import cPickle as pickle
@@ -36,6 +37,7 @@ class MemcachedConnectionClosedError(MemcachedError):
 DEFAULT_PORT = 11211
 MAGIC_REQUEST = 0x80  ##   Request packet for this protocol version
 MAGIC_RESPONSE = 0x81 ##   Response packet for this protocol version
+MAX_KEY_SIZE =  0xFA  ##   Max key size in bytes
 
 class F(object):
     """
@@ -64,6 +66,7 @@ class R(object):
     _invalid_arguments = 0x0004
     _items_not_stored = 0x0005
     _incr_decr_on_non_numeric_value = 0x0006
+    _key_too_large = 0x0007 # custom addition
 
 class M(object):
     """
@@ -211,6 +214,8 @@ def _id(opcode, key, opaque, expire, cas, delta, initial):
 # a multiget with a very large (~100K) number of keys. I guess
 # the fix is to use non-blocking sockets and do some reads when
 # you hit EWOULDBLOCK. I'm waiting on that for now.
+# in the mean time I am chunking getQ packets into blocks of 1K
+# which prevents this from happening but slightly hurts performance
 def socksend(sock, lst):
     sock.sendall(''.join(lst))
 
@@ -241,6 +246,12 @@ def sockresponse(sock):
     return (magic, opcode, keylen, extlen, datatype, status, bodylen, opaque,
             cas, extra)
 
+def chunk(iterable, chunksize):
+    it = iter(iterable)
+    item = list(itertools.islice(it, chunksize))
+    while item:
+        yield item
+        item = list(itertools.islice(it, chunksize))
 
 class Client(object):
     def __init__(self, host_list, encode_fn=pickle.dumps,
@@ -265,7 +276,7 @@ class Client(object):
         self.decompress_fn = decompress_fn
         self.threadpool = threadpool.ThreadPool(max_threads or len(host_list))
         self.hash = chash.ConsistentHash(replicas=ch_replicas)
-
+        self.default_encoding = default_encoding
         # connect up sockets and add to chash
         for host_str in host_list:
             sock = socket.socket()
@@ -284,7 +295,14 @@ class Client(object):
             host = host_str
             port = DEFAULT_PORT
         return (host, int(port))
-
+    
+    def _encode_key(self, key):
+        if self.default_encoding:
+            key = key.encode(self.default_encoding)
+        if len(key) > MAX_KEY_SIZE:
+            raise MemcachedError("%d: Key Too Large" % (R._key_too_large,))
+        return key
+            
     def _encode(self, val):
         return self.encode_fn(val)
 
@@ -350,6 +368,7 @@ class Client(object):
         """
         helper for "get-like" commands
         """
+        key = self._encode_key(key)
         with self.sock4key(key) as sock:
             socksend(sock, socket_fn(key))
             (_, _, _, _, _, status, bodylen, _, cas, extra) = sockresponse(sock)
@@ -378,11 +397,13 @@ class Client(object):
             flags, val = self._serialize(val)
         else:
             flags = 0
-
+        
+        key = self._encode_key(key)
         with self.sock4key(key) as sock:
             socksend(sock, socket_fn(key, val, expire, flags))
             (_, _, _, _, _, status, _, _, _, extra) = sockresponse(sock)
-
+            from pprint import pprint
+            # pprint(locals())
             if status != R._no_error:
                 if failure_test(status):
                     return False
@@ -417,12 +438,14 @@ class Client(object):
         else:
             sock_keygroup_map = collections.defaultdict(list)
             for key in keys:
+                key = self._encode_key(key)
                 with self.sock4key(key) as sock:
                     sock_keygroup_map[id(sock)].append(key)
             groups = sock_keygroup_map.values()
         
-        for g in groups:
-            self.threadpool.add_task(per_host_fn, g, response_map, hashkey=hashkey)
+        for group in groups:
+            for small_group in chunk(group, 1000):
+                self.threadpool.add_task(per_host_fn, small_group, response_map, hashkey=hashkey)
         self.threadpool.wait()
         return response_map
 
@@ -458,10 +481,11 @@ class Client(object):
             # group keys by the shard they hash to
             hash_groups = collections.defaultdict(dict)
             for key in kvmap.keys():
+                key = self._encode_key(key)
                 with self.sock4key(key) as sock:
                     hash_groups[id(sock)][key] = kvmap[key]
             groups = hash_groups.values()
-
+                    
         for g in groups:
             self.threadpool.add_task(per_host_fn, g, failures, hashkey=hashkey)
         self.threadpool.wait()
@@ -592,8 +616,8 @@ class Client(object):
         """
         socket_fn = lambda key,value,opaque,expire,flags: _s(M._replaceq, key, value, opaque, expire, 0, flags)
         last_socket_fn = lambda key,value,opaque,expire,flags: _s(M._replace, key, value, opaque, expire, 0, flags)
-        failure_fn = lambda status: status == R._key_not_found or status == R._key_exists
-        return self._smulti_helper(kvmap, expire, hashkey, socket_fn, last_socket_fn, failure_fn)
+        failure_test = lambda status: status == R._key_not_found or status == R._key_exists
+        return self._smulti_helper(kvmap, expire, hashkey, socket_fn, last_socket_fn, failure_test)
 
     def delete(self, key, cas=0):
         """
@@ -650,6 +674,7 @@ class Client(object):
             # group keys by the shard they live on
             groups = collections.defaultdict(list)
             for key in keys:
+                key = self._encode_key(key)
                 with self.sock4key(key) as sock:
                     groups[id(sock)].append(key)
             groups = groups.values()
@@ -673,6 +698,7 @@ class Client(object):
         >>> c.incr('incr', delta=2)
         4
         """
+        key = self._encode_key(key)
         with self.sock4key(key) as sock:
             socksend(sock, _id(M._increment, key, 0, expire, 0, delta, initial))
             (_, _, _, _, _, status, _, _, _, extra) = sockresponse(sock)
@@ -696,6 +722,7 @@ class Client(object):
         >>> c.decr('decr', delta=2)
         7
         """
+        key = self._encode_key(key)
         with self.sock4key(key) as sock:
             socksend(sock, _id(M._decrement, key, 0, expire, 0, delta, initial))
             (_, _, _, _, _, status, _, _, _, extra) = sockresponse(sock)
@@ -845,5 +872,7 @@ class Client(object):
         return host_version_map
             
 if __name__ == "__main__":
-    import doctest
-    doctest.testmod()
+    # import doctest
+    # doctest.testmod()
+    c = Client("localhost:11211")
+    c.set('keyhere', 'a'*10000000)

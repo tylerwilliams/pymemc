@@ -24,9 +24,9 @@ class BaseTest(unittest.TestCase):
         try:
             self.client.flush_all()
             self.client.close()
-        except (pymc.MemcachedError, socket.error):
-            # can happen on testSetOversizeKey
-            # or if we close our connection before here
+        except socket.error:
+            # can if we close our connection before here
+            # like when testing "quit"
             pass
 
     def random_str(self, length=5):
@@ -196,13 +196,13 @@ class TestMultiGetSetDelete(BaseTest):
         for key in sample_data.iterkeys():
             assert sample_data[key] == return_data[key]
 
-    # def testGetSetMultiFuckTon(self):
-    #     """test multigets and multisets with many values"""
-    #     sample_data = self.get_sample_data(length=15000)
-    #     assert self.client.set_multi(sample_data) == []
-    #     rdata = self.client.get_multi(sample_data.iterkeys())
-    #     for key in sample_data.iterkeys():
-    #         assert sample_data[key] == self.client.get(key) == rdata[key]
+    def testGetSetMultiFuckTon(self):
+        """test multigets and multisets with many values"""
+        sample_data = self.get_sample_data(length=50000)
+        assert self.client.set_multi(sample_data) == []
+        rdata = self.client.get_multi(sample_data.iterkeys())
+        for key in sample_data.iterkeys():
+            assert sample_data[key] == self.client.get(key) == rdata[key]
 
     def testGetMultiMissing(self):
         """test multigets with missing values"""
