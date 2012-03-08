@@ -1,6 +1,6 @@
-# pymc
+# pymemc
 
-Pymc is a python binary memcached client.
+pymemc is a python binary memcached client.
 
 ## Why another memcache client?
     * uses the binary protocol
