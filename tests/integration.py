@@ -5,7 +5,7 @@ import unittest
 import socket
 import random
 import base64
-import pymc
+import pymemc
 
 # these are not really unit tests but I'm using the unittest framework.
 # to run them you need a local memcache server(s) running on the host/ports
@@ -17,7 +17,7 @@ HOST_STRINGS = HOST_STRINGS[:1] # comment this out to run across multiple server
 
 class BaseTest(unittest.TestCase):
     def setUp(self):
-        self.client = pymc.Client(HOST_STRINGS)
+        self.client = pymemc.Client(HOST_STRINGS)
         self.client.flush_all()
 
     def tearDown(self):
@@ -42,7 +42,7 @@ class TestQuitNoop(BaseTest):
     def testQuit(self):
         """test quit command"""
         assert self.client.quit() == True
-        self.assertRaises(pymc.MemcachedError, self.client.quit)
+        self.assertRaises(pymemc.MemcachedError, self.client.quit)
 
     def testNoop(self):
         """test that noop is a... no-op?"""
@@ -80,7 +80,7 @@ class TestGetSetDelete(BaseTest):
         oversized_key = self.random_str(length=1000)
         normal_val = self.random_str(length=1000)
 
-        self.assertRaises(pymc.MemcachedError, self.client.set,
+        self.assertRaises(pymemc.MemcachedError, self.client.set,
             oversized_key, normal_val)
 
     def testSetOversizeValue(self):
@@ -89,7 +89,7 @@ class TestGetSetDelete(BaseTest):
         normal_key = self.random_str(length=100)
         oversized_val = self.random_str(length=10000000)
 
-        self.assertRaises(pymc.MemcachedError, self.client.set,
+        self.assertRaises(pymemc.MemcachedError, self.client.set,
             normal_key, oversized_val)
 
     def testDeleteSet(self):

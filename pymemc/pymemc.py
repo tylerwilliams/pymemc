@@ -15,7 +15,7 @@ import chash
 import threadpool
 
 try:
-    __version__ = pkg_resources.require("pymc")[0].version
+    __version__ = pkg_resources.require("pymemc")[0].version
 except pkg_resources.DistributionNotFound:
     __version__ = "0.0.0"
 
@@ -259,7 +259,7 @@ class Client(object):
                     decompress_fn=None, max_threads=None,
                     ch_replicas=100, default_encoding="utf-8"):
         """
-        Create a new instance of the pymc client.
+        Create a new instance of the pymemc client.
         
         >>> c = Client('localhost:11211')
         >>> c.flush_all()

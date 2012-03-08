@@ -14,7 +14,7 @@ def read(fname):
     return open(os.path.join(os.path.dirname(__file__), fname)).read()
 
 setup(
-    name='pymc',
+    name='pymemc',
     version=__version__,
     description='Python interface to Memcached.',
     long_description=read('README.md'),
@@ -22,9 +22,9 @@ setup(
     author_email='williams.tyler@gmail.com',
     maintainer='Tyler Williams',
     maintainer_email='williams.tyler@gmail.com',
-    url='https://github.com/tylerwilliams/pymc',
-    download_url='https://github.com/tylerwilliams/pymc',
-    package_dir={'pymc':'pymc'},
-    packages=['pymc'],
+    url='https://github.com/tylerwilliams/pymemc',
+    download_url='https://github.com/tylerwilliams/pymemc',
+    package_dir={'pymemc':'pymemc'},
+    packages=['pymemc'],
     requires=requires
 )
