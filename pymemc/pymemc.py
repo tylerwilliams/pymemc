@@ -1,4 +1,3 @@
-import socket
 import struct
 import logging
 import collections
@@ -13,6 +12,7 @@ except ImportError:
 
 import chash
 import threadpool
+import connpool
 
 try:
     __version__ = pkg_resources.require("pymemc")[0].version
@@ -146,7 +146,7 @@ def _gd(opcode, key, opaque, cas):
             0,                  # status
             len(key),           # body len
             opaque,             # opaque
-            cas,                  # cas
+            cas,                # cas
             key,                # key
         )
     ]
@@ -279,14 +279,14 @@ class Client(object):
         self.default_encoding = default_encoding
         # connect up sockets and add to chash
         for host_str in host_list:
-            sock = socket.socket()
-            sock.connect(self._parse_host(host_str))
-            sock.setsockopt(socket.SOL_TCP, socket.TCP_NODELAY, 1)
-            self.hash.add_node(sock)
+            pool = connpool.SocketConnectionPool(self._parse_host(host_str))
+            self.hash.add_node(pool)
 
     @contextlib.contextmanager
     def sock4key(self, key):
-        yield self.hash.get_node(key)
+        r = self.hash.get_node(key)
+        with connpool.pooled_connection(r) as sock:
+            yield sock
 
     def _parse_host(self, host_str):
         if ":" in host_str:
@@ -402,8 +402,6 @@ class Client(object):
         with self.sock4key(key) as sock:
             socksend(sock, socket_fn(key, val, expire, flags))
             (_, _, _, _, _, status, _, _, _, extra) = sockresponse(sock)
-            from pprint import pprint
-            # pprint(locals())
             if status != R._no_error:
                 if failure_test(status):
                     return False
