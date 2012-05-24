@@ -4,6 +4,7 @@ import collections
 import contextlib
 import pkg_resources
 import itertools
+import sys
 
 try:
     import cPickle as pickle
@@ -257,7 +258,7 @@ class Client(object):
     def __init__(self, host_list, encode_fn=pickle.dumps,
                     decode_fn=pickle.loads, compress_fn=None,
                     decompress_fn=None, max_threads=None,
-                    ch_replicas=100, default_encoding="utf-8"):
+                    ch_replicas=100, default_encoding="utf-8", max_value_size=1048576):
         """
         Create a new instance of the pymemc client.
         
@@ -270,6 +271,9 @@ class Client(object):
         if not isinstance(host_list, list):
             raise Exception("host_list must be a list or single host str")
 
+        if not isinstance(max_value_size, int):
+            raise Exception("max_value_size must be an int")
+
         self.encode_fn = encode_fn
         self.decode_fn = decode_fn
         self.compress_fn = compress_fn
@@ -277,6 +281,7 @@ class Client(object):
         self.threadpool = threadpool.ThreadPool(max_threads or len(host_list))
         self.hash = chash.ConsistentHash(replicas=ch_replicas)
         self.default_encoding = default_encoding
+        self.max_value_size = max_value_size
         # connect up sockets and add to chash
         for host_str in host_list:
             pool = connpool.SocketConnectionPool(self._parse_host(host_str))
@@ -399,6 +404,9 @@ class Client(object):
         else:
             flags = 0
         
+        if sys.getsizeof(val) > self.max_value_size:
+            return False
+
         key = self._encode_key(key)
         with self.sock4key(key) as sock:
             socksend(sock, socket_fn(key, val, expire, flags))
@@ -455,6 +463,12 @@ class Client(object):
         def per_host_fn(sisters_map, failure_list, hashkey=None):
             items = sisters_map.items()
             last_i = len(items)-1
+
+            for item in items:
+                if sys.getsizeof(item) > self.max_value_size:
+                    failure_list.append(item[0])
+                    items.remove(item)
+
             with self.sock4key(hashkey or items[0][0]) as sock:
                 for i,(key,val) in enumerate(items):
                     flags, val = self._serialize(val)

@@ -89,8 +89,7 @@ class TestGetSetDelete(BaseTest):
         normal_key = self.random_str(length=100)
         oversized_val = self.random_str(length=10000000)
 
-        self.assertRaises(pymemc.MemcachedError, self.client.set,
-            normal_key, oversized_val)
+        assert self.client.set(normal_key, oversized_val) == False
 
     def testDeleteSet(self):
         """test setting, getting, deleting"""
@@ -237,6 +236,14 @@ class TestMultiGetSetDelete(BaseTest):
         """test multideletes with missing values"""
         sample_data = self.get_sample_data(length=100)
         assert set(self.client.delete_multi(sample_data.iterkeys())) == set(sample_data.iterkeys())
+
+    def testSetOversizeValue(self):
+        """test multisets with oversized values"""
+        sample_data = get_sample_data()
+        normal_key = self.random_str(length=100)
+        oversized_val = self.random_str(length=10000000)
+        sample_data[normal_key] = oversized_val
+        assert set(self.client.set_multi(sample_data)) == set([normal_key])
 
 class TestMultiAddReplace(BaseTest):
     def testReplaceMulti(self):
