@@ -271,9 +271,6 @@ class Client(object):
         if not isinstance(host_list, list):
             raise Exception("host_list must be a list or single host str")
 
-        if not isinstance(max_value_size, int):
-            raise Exception("max_value_size must be an int")
-
         self.encode_fn = encode_fn
         self.decode_fn = decode_fn
         self.compress_fn = compress_fn
@@ -543,6 +540,8 @@ class Client(object):
         >>> c.set('bar', 'baz')
         True
         """
+        if sys.getsizeof(val) > self.max_value_size:
+            raise Exception("Value exceeds limit.")
         socket_fn = lambda key,val,expire,flags: _s(M._set, key, val, 0, expire, cas, flags)
         failure_test = lambda status: status == R._items_not_stored or status == R._key_exists
         return self._s_helper(key, val, expire, socket_fn, failure_test)
