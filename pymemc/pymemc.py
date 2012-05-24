@@ -543,6 +543,8 @@ class Client(object):
         >>> c.set('bar', 'baz')
         True
         """
+        if sys.getsizeof(val) > self.max_value_size:
+            raise Exception("Value exceeds limit.")
         socket_fn = lambda key,val,expire,flags: _s(M._set, key, val, 0, expire, cas, flags)
         failure_test = lambda status: status == R._items_not_stored or status == R._key_exists
         return self._s_helper(key, val, expire, socket_fn, failure_test)
