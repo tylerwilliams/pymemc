@@ -361,8 +361,9 @@ class Client(object):
         >>> c.close()
         """
         self.quit()
-        for sock in self.hash.all_nodes():
-            sock.close()
+        for r in self.hash.all_nodes():
+            with connpool.pooled_connection(r) as sock:
+                sock.close()
 
     def _g_helper(self, key, socket_fn, failure_test, unpack=True, return_cas=False):
         """
@@ -773,11 +774,12 @@ class Client(object):
         >>> c.quit()
         True
         """
-        for sock in self.hash.all_nodes():
-            socksend(sock, _qnsv(M._quit))
-            (_, _, _, _, _, status, _, _, _, extra) = sockresponse(sock)
-            if status != R._no_error:
-                raise MemcachedError("%d: %s" % (status, extra))
+        for r in self.hash.all_nodes():
+            with connpool.pooled_connection(r) as sock:
+                socksend(sock, _qnsv(M._quit))
+                (_, _, _, _, _, status, _, _, _, extra) = sockresponse(sock)
+                if status != R._no_error:
+                    raise MemcachedError("%d: %s" % (status, extra))
         return True
 
     def flush_all(self, expire=0):
@@ -789,11 +791,12 @@ class Client(object):
         >>> c.flush_all()
         True
         """
-        for sock in self.hash.all_nodes():
-            socksend(sock, _f(M._flush, expire))
-            (_, _, _, _, _, status, _, _, _, extra) = sockresponse(sock)
-            if status != R._no_error:
-                raise MemcachedError("%d: %s" % (status, extra))
+        for r in self.hash.all_nodes():
+            with connpool.pooled_connection(r) as sock:
+                socksend(sock, _f(M._flush, expire))
+                (_, _, _, _, _, status, _, _, _, extra) = sockresponse(sock)
+                if status != R._no_error:
+                    raise MemcachedError("%d: %s" % (status, extra))
         return True
 
     def stats(self):
@@ -836,11 +839,12 @@ class Client(object):
         >>> c.noop()
         True
         """
-        for sock in self.hash.all_nodes():
-            socksend(sock, _qnsv(M._noop))
-            (_, _, _, _, _, status, _, _, _, extra) = sockresponse(sock)
-            if status != R._no_error:
-                raise MemcachedError("%d: %s" % (status, extra))
+        for r in self.hash.all_nodes():
+            with connpool.pooled_connection(r) as sock:
+                socksend(sock, _qnsv(M._noop))
+                (_, _, _, _, _, status, _, _, _, extra) = sockresponse(sock)
+                if status != R._no_error:
+                    raise MemcachedError("%d: %s" % (status, extra))
         return True
 
     def version(self):
@@ -863,8 +867,9 @@ class Client(object):
             host_key = "%s:%s" % sock.getpeername()
             rmap[host_key] = version_string
 
-        for sock in self.hash.all_nodes():
-            self.threadpool.add_task(per_host_version, sock, host_version_map)
+        for r in self.hash.all_nodes():
+            with connpool.pooled_connection(r) as sock:
+                self.threadpool.add_task(per_host_version, sock, host_version_map)
         self.threadpool.wait()
 
         return host_version_map
