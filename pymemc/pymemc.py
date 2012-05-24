@@ -271,9 +271,6 @@ class Client(object):
         if not isinstance(host_list, list):
             raise Exception("host_list must be a list or single host str")
 
-        if not isinstance(max_value_size, int):
-            raise Exception("max_value_size must be an int")
-
         self.encode_fn = encode_fn
         self.decode_fn = decode_fn
         self.compress_fn = compress_fn
