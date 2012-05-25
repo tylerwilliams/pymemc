@@ -239,7 +239,7 @@ class TestMultiGetSetDelete(BaseTest):
 
     def testSetOversizeValue(self):
         """test multisets with oversized values"""
-        sample_data = get_sample_data()
+        sample_data = self.get_sample_data()
         normal_key = self.random_str(length=100)
         oversized_val = self.random_str(length=10000000)
         sample_data[normal_key] = oversized_val

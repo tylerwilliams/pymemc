@@ -460,12 +460,14 @@ class Client(object):
         def per_host_fn(sisters_map, failure_list, hashkey=None):
             items = sisters_map.items()
             last_i = len(items)-1
-
+            
+            oversized_items = []
             for item in items:
                 if sys.getsizeof(item) > self.max_value_size:
-                    failure_list.append(item[0])
-                    items.remove(item)
-
+                    oversized_items.append(item)
+            for item in oversized_items:
+                failure_list.append(item[0])
+                items.remove(item)
             with self.sock4key(hashkey or items[0][0]) as sock:
                 for i,(key,val) in enumerate(items):
                     flags, val = self._serialize(val)
@@ -540,8 +542,6 @@ class Client(object):
         >>> c.set('bar', 'baz')
         True
         """
-        if sys.getsizeof(val) > self.max_value_size:
-            raise Exception("Value exceeds limit.")
         socket_fn = lambda key,val,expire,flags: _s(M._set, key, val, 0, expire, cas, flags)
         failure_test = lambda status: status == R._items_not_stored or status == R._key_exists
         return self._s_helper(key, val, expire, socket_fn, failure_test)
