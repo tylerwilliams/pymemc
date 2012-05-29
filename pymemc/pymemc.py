@@ -220,6 +220,7 @@ def _id(opcode, key, opaque, expire, cas, delta, initial):
 def socksend(sock, lst):
     sock.sendall(''.join(lst))
 
+@connpool.reconnect
 def sockrecv(sock, num_bytes):
     d = ''
     while len(d) < num_bytes:
@@ -366,7 +367,7 @@ class Client(object):
         for r in self.hash.all_nodes():
             with connpool.pooled_connection(r) as sock:
                 sock.close()
-
+    @connpool.reconnect
     def _g_helper(self, key, socket_fn, failure_test, unpack=True, return_cas=False):
         """
         helper for "get-like" commands
