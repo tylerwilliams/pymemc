@@ -220,7 +220,6 @@ def _id(opcode, key, opaque, expire, cas, delta, initial):
 def socksend(sock, lst):
     sock.sendall(''.join(lst))
 
-@connpool.reconnect
 def sockrecv(sock, num_bytes):
     d = ''
     while len(d) < num_bytes:
