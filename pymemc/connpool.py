@@ -1,6 +1,10 @@
 import Queue
 import socket
 import contextlib
+import functools
+import logging
+
+logger = logging.getLogger(__name__)
 
 @contextlib.contextmanager
 def pooled_connection(pool):
@@ -11,7 +15,22 @@ def pooled_connection(pool):
         raise
     else:
         pool.put(conn)
-        
+
+def reconnect(method):
+
+    @functools.wraps(method)
+    def wrapper(*args, **kwargs):
+        try:
+            return method(*args, **kwargs)
+        except Exception:
+            logger.warning("Bad socket, retrying with a new socket.")
+            for pool in args[0].hash.all_nodes():
+                pool.clear_pool()
+                return method(*args, **kwargs)
+
+    return wrapper
+
+
 class ConnectionPool(object):
     def __init__(self, klass, *args, **kwargs):
         self._args = args
@@ -30,6 +49,10 @@ class ConnectionPool(object):
             self._queue.put_nowait(conn)
         except Queue.Full:
             pass
+
+    def clear_pool(self):
+        if not self._queue.empty():
+            self._queue.queue.clear()
                     
 class SocketConnectionPool(ConnectionPool):
     def __init__(self, *args, **kwargs):

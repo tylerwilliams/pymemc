@@ -366,7 +366,7 @@ class Client(object):
         for r in self.hash.all_nodes():
             with connpool.pooled_connection(r) as sock:
                 sock.close()
-
+    @connpool.reconnect
     def _g_helper(self, key, socket_fn, failure_test, unpack=True, return_cas=False):
         """
         helper for "get-like" commands
@@ -392,6 +392,7 @@ class Client(object):
         else:
             return value
 
+    @connpool.reconnect
     def _s_helper(self, key, val, expire, socket_fn, failure_test, serialize=True):
         """
         helper for "set-like" commands
@@ -416,10 +417,12 @@ class Client(object):
 
         return True
 
+    @connpool.reconnect
     def _gmulti_helper(self, keys, hashkey, socket_fn, last_socket_fn):
         """
             helper for "multi_get-like" commands
         """
+        @connpool.reconnect
         def per_host_fn(sister_keys, response_map, hashkey=None):
             with self.sock4key(hashkey or sister_keys[0]) as sock:
                 last_i = len(sister_keys)-1
@@ -453,10 +456,12 @@ class Client(object):
         self.threadpool.wait()
         return response_map
 
+    @connpool.reconnect
     def _smulti_helper(self, kvmap, expire, hashkey, socket_fn, last_socket_fn, failure_test):
         """
             helper for "multi_set-like" commands
         """
+        @connpool.reconnect
         def per_host_fn(sisters_map, failure_list, hashkey=None):
             items = sisters_map.items()
             last_i = len(items)-1
@@ -649,6 +654,7 @@ class Client(object):
         rval = self._g_helper(key, socket_fn, failure_test, unpack=False)
         return rval or False
 
+    @connpool.reconnect
     def delete_multi(self, keys, hashkey=None):
         """
         The delete_multi command removes the value for each key
@@ -664,6 +670,7 @@ class Client(object):
         >>> c.delete_multi(['l', 'k'])
         ['l', 'k']
         """
+        @connpool.reconnect
         def per_host_delete(items, failure_list, hashkey=None):
             last_i = len(items)-1
             with self.sock4key(hashkey or items[0]) as sock:
@@ -697,6 +704,7 @@ class Client(object):
 
         return failures
 
+    @connpool.reconnect
     def incr(self, key, expire=0, delta=1, initial=0):
         """
         Increment key by the specified amount. If the key does
@@ -721,6 +729,7 @@ class Client(object):
         value, = struct.unpack('!Q', extra)
         return value
 
+    @connpool.reconnect
     def decr(self, key, expire=0, delta=1, initial=0):
         """
         Decrement key by the specified amount. If the key does
@@ -779,6 +788,7 @@ class Client(object):
         failure_test = lambda status: status == R._items_not_stored
         return self._s_helper(key, val, 0, socket_fn, failure_test, serialize=False)
 
+    @connpool.reconnect
     def quit(self):
         """
         The quit command closes the remote socket.
@@ -795,6 +805,7 @@ class Client(object):
                     raise MemcachedError("%d: %s" % (status, extra))
         return True
 
+    @connpool.reconnect
     def flush_all(self, expire=0):
         """
         The flush command flushes all data the DB. Optionally this will happen
@@ -843,6 +854,7 @@ class Client(object):
 
         return host_stats_map
 
+    @connpool.reconnect
     def noop(self):
         """
         The noop command Flushes outstanding getq/getkq's and can be used
@@ -860,6 +872,7 @@ class Client(object):
                     raise MemcachedError("%d: %s" % (status, extra))
         return True
 
+    @connpool.reconnect
     def version(self):
         """
         The version command returns the server's version string.
@@ -869,6 +882,7 @@ class Client(object):
         {'...
         """
         host_version_map = {}
+        @connpool.reconnect
         def per_host_version(sock, rmap):
             socksend(sock, _qnsv(M._version))
             (_, _, keylen, _, _, status, bodylen, _, _, extra) = sockresponse(sock)

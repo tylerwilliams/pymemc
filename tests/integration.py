@@ -6,6 +6,7 @@ import socket
 import random
 import base64
 import pymemc
+import subprocess
 
 # these are not really unit tests but I'm using the unittest framework.
 # to run them you need a local memcache server(s) running on the host/ports
@@ -17,6 +18,10 @@ HOST_STRINGS = HOST_STRINGS[:1] # comment this out to run across multiple server
 
 class BaseTest(unittest.TestCase):
     def setUp(self):
+        try:
+            self.mc = subprocess.Popen(['memcached'], stderr=subprocess.STDOUT, stdout=subprocess.PIPE)
+        except Exception:
+            raise
         self.client = pymemc.Client(HOST_STRINGS)
         self.client.flush_all()
 
@@ -24,6 +29,7 @@ class BaseTest(unittest.TestCase):
         try:
             self.client.flush_all()
             self.client.close()
+            self.mc.kill()
         except socket.error:
             # can if we close our connection before here
             # like when testing "quit"
@@ -109,6 +115,18 @@ class TestGetSetDelete(BaseTest):
 
         for key,val in sample_data.iteritems():
             assert self.client.get(key) == None
+
+    def testGetRetry(self):
+        sample_data = self.get_sample_data(length=100)
+                
+        self.mc.kill()
+        self.mc = subprocess.Popen(['memcached'], stderr=subprocess.STDOUT, stdout=subprocess.PIPE)
+
+        for key, val in sample_data.iteritems():
+            assert self.client.set(key, val) == True
+
+        for key in sample_data.iterkeys():
+            assert sample_data[key] == self.client.get(key)
 
 class TestAddReplace(BaseTest):
     def testAddGet(self):
