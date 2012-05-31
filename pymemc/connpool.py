@@ -2,6 +2,9 @@ import Queue
 import socket
 import contextlib
 import functools
+import logging
+
+logger = logging.getLogger(__name__)
 
 @contextlib.contextmanager
 def pooled_connection(pool):
@@ -20,8 +23,7 @@ def reconnect(method):
         try:
             return method(*args, **kwargs)
         except Exception:
-            print "RETRYING"
-            print args[0]
+            logger.warning("Bad socket, retrying with a new socket.")
             for pool in args[0].hash.all_nodes():
                 pool.clear_pool()
                 return method(*args, **kwargs)
