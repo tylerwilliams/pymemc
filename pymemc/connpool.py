@@ -14,20 +14,20 @@ def pooled_connection(pool):
         pool.put(conn)
 
 def reconnect(method):
+
     @functools.wraps(method)
     def wrapper(*args, **kwargs):
-        retries = kwargs.pop('retries', 1)
-        tries = 0
-        
-        while True:
-            try:
+        try:
+            return method(*args, **kwargs)
+        except Exception:
+            print "RETRYING"
+            print args[0]
+            for pool in args[0].hash.all_nodes():
+                pool.clear_pool()
                 return method(*args, **kwargs)
-            except Exception:
-                if tries >= retries:
-                    raise
-                tries += 1
 
-    return wrapper        
+    return wrapper
+
 
 class ConnectionPool(object):
     def __init__(self, klass, *args, **kwargs):
@@ -47,6 +47,10 @@ class ConnectionPool(object):
             self._queue.put_nowait(conn)
         except Queue.Full:
             pass
+
+    def clear_pool(self):
+        if not self._queue.empty():
+            self._queue.queue.clear()
                     
 class SocketConnectionPool(ConnectionPool):
     def __init__(self, *args, **kwargs):
