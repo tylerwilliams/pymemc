@@ -4,6 +4,8 @@ import contextlib
 import functools
 import logging
 
+import exc
+
 logger = logging.getLogger(__name__)
 
 @contextlib.contextmanager
@@ -16,18 +18,16 @@ def pooled_connection(pool):
     else:
         pool.put(conn)
 
-def reconnect(method):
-
+def instance_reconnect(method):
     @functools.wraps(method)
-    def wrapper(*args, **kwargs):
+    def wrapper(self, *args, **kwargs):
         try:
-            return method(*args, **kwargs)
-        except Exception:
-            logger.warning("Bad socket, retrying with a new socket.")
-            for pool in args[0].hash.all_nodes():
+            return method(self, *args, **kwargs)
+        except exc.MemcachedConnectionClosedError:
+            logger.warning("Stale connection, retrying...")
+            for pool in self.hash.all_nodes():
                 pool.clear_pool()
-                return method(*args, **kwargs)
-
+            return method(self, *args, **kwargs)
     return wrapper
 
 
@@ -57,8 +57,7 @@ class ConnectionPool(object):
 class SocketConnectionPool(ConnectionPool):
     def __init__(self, *args, **kwargs):
         def socket_create_and_connect(*args, **kwargs):
-            sock = socket.socket()
-            sock.connect(*args, **kwargs)
+            sock = socket.create_connection(*args, **kwargs)
             sock.setsockopt(socket.SOL_TCP, socket.TCP_NODELAY, 1)
             return sock
         super(SocketConnectionPool, self).__init__(socket_create_and_connect, *args, **kwargs)

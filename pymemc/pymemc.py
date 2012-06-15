@@ -15,6 +15,8 @@ import chash
 import threadpool
 import connpool
 
+from exc import MemcachedConnectionClosedError, MemcachedError
+
 try:
     __version__ = pkg_resources.require("pymemc")[0].version
 except pkg_resources.DistributionNotFound:
@@ -28,12 +30,6 @@ __all__ = [
 ]
 
 logger = logging.getLogger(__name__)
-
-class MemcachedError(Exception):
-    pass
-
-class MemcachedConnectionClosedError(MemcachedError):
-    pass
 
 DEFAULT_PORT = 11211
 MAGIC_REQUEST = 0x80  ##   Request packet for this protocol version
@@ -210,7 +206,7 @@ def _id(opcode, key, opaque, expire, cas, delta, initial):
         )
     ]
 
-# TODO: yada yada yada, if you send too much without receiving 
+# TODO: yada yada yada, if you send too much without receiving
 # the socket will eventually block. You can see this if you do
 # a multiget with a very large (~100K) number of keys. I guess
 # the fix is to use non-blocking sockets and do some reads when
@@ -255,13 +251,20 @@ def chunk(iterable, chunksize):
         item = list(itertools.islice(it, chunksize))
 
 class Client(object):
-    def __init__(self, host_list, encode_fn=pickle.dumps,
-                    decode_fn=pickle.loads, compress_fn=None,
-                    decompress_fn=None, max_threads=None,
-                    ch_replicas=100, default_encoding="utf-8", max_value_size=1048576):
+    def __init__(self,
+                 host_list,
+                 encode_fn=pickle.dumps,
+                 decode_fn=pickle.loads,
+                 compress_fn=None,
+                 decompress_fn=None,
+                 max_threads=None,
+                 ch_replicas=100,
+                 default_encoding="utf-8",
+                 max_value_size=1048576,
+                 connect_timeout_seconds=1):
         """
         Create a new instance of the pymemc client.
-        
+
         >>> c = Client('localhost:11211')
         >>> c.flush_all()
         True
@@ -275,13 +278,14 @@ class Client(object):
         self.decode_fn = decode_fn
         self.compress_fn = compress_fn
         self.decompress_fn = decompress_fn
+        # if max threads is not specified, we'll use one per host
         self.threadpool = threadpool.ThreadPool(max_threads or len(host_list))
         self.hash = chash.ConsistentHash(replicas=ch_replicas)
         self.default_encoding = default_encoding
         self.max_value_size = max_value_size
         # connect up sockets and add to chash
         for host_str in host_list:
-            pool = connpool.SocketConnectionPool(self._parse_host(host_str))
+            pool = connpool.SocketConnectionPool(self._parse_host(host_str), connect_timeout_seconds)
             self.hash.add_node(pool)
 
     @contextlib.contextmanager
@@ -297,14 +301,14 @@ class Client(object):
             host = host_str
             port = DEFAULT_PORT
         return (host, int(port))
-    
+
     def _encode_key(self, key):
         if self.default_encoding:
             key = key.encode(self.default_encoding)
         if len(key) > MAX_KEY_SIZE:
             raise MemcachedError("%d: Key Too Large" % (R._key_too_large,))
         return key
-            
+
     def _encode(self, val):
         return self.encode_fn(val)
 
@@ -358,7 +362,7 @@ class Client(object):
     def close(self):
         """
         Close the connections to all servers.
-        
+
         >>> c = Client('localhost:11211')
         >>> c.close()
         """
@@ -366,7 +370,8 @@ class Client(object):
         for r in self.hash.all_nodes():
             with connpool.pooled_connection(r) as sock:
                 sock.close()
-    @connpool.reconnect
+
+    @connpool.instance_reconnect
     def _g_helper(self, key, socket_fn, failure_test, unpack=True, return_cas=False):
         """
         helper for "get-like" commands
@@ -392,7 +397,7 @@ class Client(object):
         else:
             return value
 
-    @connpool.reconnect
+    @connpool.instance_reconnect
     def _s_helper(self, key, val, expire, socket_fn, failure_test, serialize=True):
         """
         helper for "set-like" commands
@@ -401,7 +406,7 @@ class Client(object):
             flags, val = self._serialize(val)
         else:
             flags = 0
-        
+
         if sys.getsizeof(val) > self.max_value_size:
             return False
 
@@ -417,12 +422,11 @@ class Client(object):
 
         return True
 
-    @connpool.reconnect
+    @connpool.instance_reconnect
     def _gmulti_helper(self, keys, hashkey, socket_fn, last_socket_fn):
         """
             helper for "multi_get-like" commands
         """
-        @connpool.reconnect
         def per_host_fn(sister_keys, response_map, hashkey=None):
             with self.sock4key(hashkey or sister_keys[0]) as sock:
                 last_i = len(sister_keys)-1
@@ -449,23 +453,22 @@ class Client(object):
                 with self.sock4key(key) as sock:
                     sock_keygroup_map[id(sock)].append(key)
             groups = sock_keygroup_map.values()
-        
+
         for group in groups:
             for small_group in chunk(group, 1000):
                 self.threadpool.add_task(per_host_fn, small_group, response_map, hashkey=hashkey)
         self.threadpool.wait()
         return response_map
 
-    @connpool.reconnect
+    @connpool.instance_reconnect
     def _smulti_helper(self, kvmap, expire, hashkey, socket_fn, last_socket_fn, failure_test):
         """
             helper for "multi_set-like" commands
         """
-        @connpool.reconnect
         def per_host_fn(sisters_map, failure_list, hashkey=None):
             items = sisters_map.items()
             last_i = len(items)-1
-            
+
             oversized_items = []
             for item in items:
                 if sys.getsizeof(item) > self.max_value_size:
@@ -490,7 +493,7 @@ class Client(object):
                     if opaque == last_i: # last item!
                         break
         failures = []
-        
+
         if hashkey:
             # user is forcing everything to one shard
             groups = [kvmap]
@@ -502,7 +505,7 @@ class Client(object):
                 with self.sock4key(key) as sock:
                     hash_groups[id(sock)][key] = kvmap[key]
             groups = hash_groups.values()
-                    
+
         for g in groups:
             self.threadpool.add_task(per_host_fn, g, failures, hashkey=hashkey)
         self.threadpool.wait()
@@ -512,7 +515,7 @@ class Client(object):
     def get(self, key, cas=False):
         """
         The get command returns the value for a single key.
-        
+
         >>> c = Client('localhost:11211')
         >>> c.set('foo', 'bar')
         True
@@ -527,7 +530,7 @@ class Client(object):
         """
         The get_multi command returns a dictionary mapping found keys to their
         values. Keys will be omitted if their value is not found.
-        
+
         >>> c = Client('localhost:11211')
         >>> c.set_multi({'a':1, 'b':2})
         []
@@ -538,11 +541,10 @@ class Client(object):
         last_socket_fn = lambda key,opaque: _gd(M._get, key, opaque, 0)
         return self._gmulti_helper(keys, hashkey, socket_fn, last_socket_fn)
 
-
     def set(self, key, val, expire=0, cas=0):
         """
         The set command sets a single key/val.
-        
+
         >>> c = Client('localhost:11211')
         >>> c.set('bar', 'baz')
         True
@@ -555,7 +557,7 @@ class Client(object):
         """
         The set_multi command returns a list of keys that could not be set, or
         an empty list if all keys were successfully set.
-        
+
         >>> c = Client('localhost:11211')
         >>> c.set_multi({'c':3, 'd':4})
         []
@@ -570,7 +572,7 @@ class Client(object):
         """
         The add command sets a single key.
         Add MUST fail if the item already exists.
-        
+
         >>> c = Client('localhost:11211')
         >>> c.set('already_added', 'val')
         True
@@ -588,7 +590,7 @@ class Client(object):
         """
         The add_multi command returns a list of keys that could not be added, or
         an empty list if all keys were successfully added.
-        
+
         >>> c = Client('localhost:11211')
         >>> c.add_multi({'e':5, 'f':6})
         []
@@ -605,7 +607,7 @@ class Client(object):
         """
         The replace command replaces a single key.
         Replace MUST fail if the item doesn't exist.
-        
+
         >>> c = Client('localhost:11211')
         >>> c.set('replace_me', 'val')
         True
@@ -640,7 +642,7 @@ class Client(object):
         """
         The delete command removes the value for a single key.
         True is returned on success, or False if the key was missing.
-        
+
         >>> c = Client('localhost:11211')
         >>> c.set('delete_me', 'val')
         True
@@ -654,7 +656,7 @@ class Client(object):
         rval = self._g_helper(key, socket_fn, failure_test, unpack=False)
         return rval or False
 
-    @connpool.reconnect
+    @connpool.instance_reconnect
     def delete_multi(self, keys, hashkey=None):
         """
         The delete_multi command removes the value for each key
@@ -670,7 +672,6 @@ class Client(object):
         >>> c.delete_multi(['l', 'k'])
         ['l', 'k']
         """
-        @connpool.reconnect
         def per_host_delete(items, failure_list, hashkey=None):
             last_i = len(items)-1
             with self.sock4key(hashkey or items[0]) as sock:
@@ -704,12 +705,12 @@ class Client(object):
 
         return failures
 
-    @connpool.reconnect
+    @connpool.instance_reconnect
     def incr(self, key, expire=0, delta=1, initial=0):
         """
         Increment key by the specified amount. If the key does
         not exist, create it with the value of initial.
-        
+
         >>> c = Client('localhost:11211')
         >>> c.incr('incr', initial=1)
         1
@@ -729,12 +730,12 @@ class Client(object):
         value, = struct.unpack('!Q', extra)
         return value
 
-    @connpool.reconnect
+    @connpool.instance_reconnect
     def decr(self, key, expire=0, delta=1, initial=0):
         """
         Decrement key by the specified amount. If the key does
         not exist, create it with the value of initial.
-        
+
         >>> c = Client('localhost:11211')
         >>> c.decr('decr', initial=10)
         10
@@ -758,7 +759,7 @@ class Client(object):
         """
         The append command will prepend the specified value to
         the requested key.
-        
+
         >>> c = Client('localhost:11211')
         >>> c.set('app', 'aft')
         True
@@ -775,7 +776,7 @@ class Client(object):
         """
         The prepend command will prepend the specified value to
         the requested key.
-        
+
         >>> c = Client('localhost:11211')
         >>> c.set('pre', 'fix')
         True
@@ -788,7 +789,7 @@ class Client(object):
         failure_test = lambda status: status == R._items_not_stored
         return self._s_helper(key, val, 0, socket_fn, failure_test, serialize=False)
 
-    @connpool.reconnect
+    @connpool.instance_reconnect
     def quit(self):
         """
         The quit command closes the remote socket.
@@ -805,7 +806,7 @@ class Client(object):
                     raise MemcachedError("%d: %s" % (status, extra))
         return True
 
-    @connpool.reconnect
+    @connpool.instance_reconnect
     def flush_all(self, expire=0):
         """
         The flush command flushes all data the DB. Optionally this will happen
@@ -854,7 +855,7 @@ class Client(object):
 
         return host_stats_map
 
-    @connpool.reconnect
+    @connpool.instance_reconnect
     def noop(self):
         """
         The noop command Flushes outstanding getq/getkq's and can be used
@@ -872,7 +873,7 @@ class Client(object):
                     raise MemcachedError("%d: %s" % (status, extra))
         return True
 
-    @connpool.reconnect
+    @connpool.instance_reconnect
     def version(self):
         """
         The version command returns the server's version string.
@@ -882,7 +883,6 @@ class Client(object):
         {'...
         """
         host_version_map = {}
-        @connpool.reconnect
         def per_host_version(sock, rmap):
             socksend(sock, _qnsv(M._version))
             (_, _, keylen, _, _, status, bodylen, _, _, extra) = sockresponse(sock)
@@ -900,7 +900,7 @@ class Client(object):
         self.threadpool.wait()
 
         return host_version_map
-            
+
 if __name__ == "__main__":
     # import doctest
     # doctest.testmod()

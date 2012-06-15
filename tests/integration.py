@@ -1,6 +1,7 @@
 import os
 import sys
 sys.path.append("..")
+import time
 import unittest
 import socket
 import random
@@ -48,7 +49,9 @@ class TestQuitNoop(BaseTest):
     def testQuit(self):
         """test quit command"""
         assert self.client.quit() == True
-        self.assertRaises(pymemc.MemcachedError, self.client.quit)
+        # this is a terribly weak test. we can't assert the following
+        # because of the new retry logic. 
+        # self.assertRaises(pymemc.MemcachedError, self.client.quit)
 
     def testNoop(self):
         """test that noop is a... no-op?"""
@@ -121,7 +124,7 @@ class TestGetSetDelete(BaseTest):
                 
         self.mc.kill()
         self.mc = subprocess.Popen(['memcached'], stderr=subprocess.STDOUT, stdout=subprocess.PIPE)
-
+        time.sleep(1)
         for key, val in sample_data.iteritems():
             assert self.client.set(key, val) == True
 
