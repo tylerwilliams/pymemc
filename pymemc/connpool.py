@@ -21,15 +21,18 @@ def pooled_connection(pool):
 def instance_reconnect(method):
     @functools.wraps(method)
     def wrapper(self, *args, **kwargs):
-        try:
-            return method(self, *args, **kwargs)
-        except exc.MemcachedConnectionClosedError:
-            logger.warning("Stale connection, retrying...")
-            for pool in self.hash.all_nodes():
-                pool.clear_pool()
-            return method(self, *args, **kwargs)
+        retries = 3
+        while retries:
+            try:
+                return method(self, *args, **kwargs)
+            except (exc.MemcachedConnectionClosedError, socket.error), e:
+                logger.warning("Stale connection, retry %i...", retries)
+                retries -= 1
+                if not retries:
+                    raise
+                for pool in self.hash.all_nodes():
+                    pool.clear_pool()
     return wrapper
-
 
 class ConnectionPool(object):
     def __init__(self, klass, *args, **kwargs):

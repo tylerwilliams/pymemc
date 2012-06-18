@@ -15,6 +15,9 @@ import chash
 import threadpool
 import connpool
 
+# in general, raise an exception if an expected return value
+# is out of bounds but handle normal errors with true/false
+# and failure lists (this includes k/v oversize errors)
 from exc import MemcachedConnectionClosedError, MemcachedError
 
 try:
@@ -283,7 +286,7 @@ class Client(object):
         self.hash = chash.ConsistentHash(replicas=ch_replicas)
         self.default_encoding = default_encoding
         self.max_value_size = max_value_size
-        # connect up sockets and add to chash
+        # maintain a separate pool of connections for each host
         for host_str in host_list:
             pool = connpool.SocketConnectionPool(self._parse_host(host_str), connect_timeout_seconds)
             self.hash.add_node(pool)
@@ -305,8 +308,8 @@ class Client(object):
     def _encode_key(self, key):
         if self.default_encoding:
             key = key.encode(self.default_encoding)
-        if len(key) > MAX_KEY_SIZE:
-            raise MemcachedError("%d: Key Too Large" % (R._key_too_large,))
+        # if len(key) > MAX_KEY_SIZE:
+            # raise MemcachedError("%d: Key Too Large" % (R._key_too_large,))
         return key
 
     def _encode(self, val):
@@ -359,24 +362,16 @@ class Client(object):
             return self._decode(value)
         return value
 
-    def close(self):
-        """
-        Close the connections to all servers.
-
-        >>> c = Client('localhost:11211')
-        >>> c.close()
-        """
-        self.quit()
-        for r in self.hash.all_nodes():
-            with connpool.pooled_connection(r) as sock:
-                sock.close()
-
     @connpool.instance_reconnect
-    def _g_helper(self, key, socket_fn, failure_test, unpack=True, return_cas=False):
+    def _per_host_g(self, key, socket_fn, failure_test, unpack=True, return_cas=False):
         """
         helper for "get-like" commands
         """
         key = self._encode_key(key)
+
+        if (len(key) > MAX_KEY_SIZE):
+            return None
+
         with self.sock4key(key) as sock:
             socksend(sock, socket_fn(key))
             (_, _, _, _, _, status, bodylen, _, cas, extra) = sockresponse(sock)
@@ -398,50 +393,26 @@ class Client(object):
             return value
 
     @connpool.instance_reconnect
-    def _s_helper(self, key, val, expire, socket_fn, failure_test, serialize=True):
-        """
-        helper for "set-like" commands
-        """
-        if serialize:
-            flags, val = self._serialize(val)
-        else:
-            flags = 0
-
-        if sys.getsizeof(val) > self.max_value_size:
-            return False
-
-        key = self._encode_key(key)
-        with self.sock4key(key) as sock:
-            socksend(sock, socket_fn(key, val, expire, flags))
-            (_, _, _, _, _, status, _, _, _, extra) = sockresponse(sock)
-            if status != R._no_error:
-                if failure_test(status):
-                    return False
+    def _per_host_gmulti(self, sister_keys, response_map, socket_fn, last_socket_fn, hashkey=None):
+        with self.sock4key(hashkey or sister_keys[0]) as sock:
+            last_i = len(sister_keys)-1
+            for i,key in enumerate(sister_keys):
+                if i == last_i:
+                    socksend(sock, last_socket_fn(key, i))
                 else:
-                    raise MemcachedError("%d: %s" % (status, extra))
+                    socksend(sock, socket_fn(key, i))
+            while 1:
+                (_, _, _, _, _, status, bodylen, opaque, _, extra) = sockresponse(sock)
+                if status == R._no_error:
+                    flags, value = struct.unpack('!L%ds' % (bodylen - 4, ), extra)
+                    response_map[sister_keys[opaque]] = self._deserialize(value, flags)
+                if opaque == last_i: # last response?
+                    break
 
-        return True
-
-    @connpool.instance_reconnect
     def _gmulti_helper(self, keys, hashkey, socket_fn, last_socket_fn):
         """
             helper for "multi_get-like" commands
         """
-        def per_host_fn(sister_keys, response_map, hashkey=None):
-            with self.sock4key(hashkey or sister_keys[0]) as sock:
-                last_i = len(sister_keys)-1
-                for i,key in enumerate(sister_keys):
-                    if i == last_i:
-                        socksend(sock, last_socket_fn(key, i))
-                    else:
-                        socksend(sock, socket_fn(key, i))
-                while 1:
-                    (_, _, _, _, _, status, bodylen, opaque, _, extra) = sockresponse(sock)
-                    if status == R._no_error:
-                        flags, value = struct.unpack('!L%ds' % (bodylen - 4, ), extra)
-                        response_map[sister_keys[opaque]] = self._deserialize(value, flags)
-                    if opaque == last_i: # last response?
-                        break
         response_map = {}
 
         if hashkey:
@@ -456,44 +427,69 @@ class Client(object):
 
         for group in groups:
             for small_group in chunk(group, 1000):
-                self.threadpool.add_task(per_host_fn, small_group, response_map, hashkey=hashkey)
+                self.threadpool.add_task(self._per_host_gmulti, small_group, response_map, socket_fn, last_socket_fn, hashkey=hashkey)
         self.threadpool.wait()
         return response_map
 
     @connpool.instance_reconnect
+    def _per_host_s(self, key, val, expire, socket_fn, failure_test, serialize=True):
+        """
+        helper for "set-like" commands
+        """
+        if serialize:
+            flags, val = self._serialize(val)
+        else:
+            flags = 0
+
+        key = self._encode_key(key)
+
+        if (sys.getsizeof(val) > self.max_value_size) or (len(key) > MAX_KEY_SIZE):
+            return False
+
+        with self.sock4key(key) as sock:
+            socksend(sock, socket_fn(key, val, expire, flags))
+            (_, _, _, _, _, status, _, _, _, extra) = sockresponse(sock)
+            if status != R._no_error:
+                if failure_test(status):
+                    return False
+                else:
+                    raise MemcachedError("%d: %s" % (status, extra))
+
+        return True
+
+    @connpool.instance_reconnect
+    def _per_host_smulti(self, kv_map, failure_list, expire, socket_fn, last_socket_fn, failure_test, hashkey=None, serialize=True):
+        items = kv_map.items()
+        last_index = len(items)-1
+
+        with self.sock4key(hashkey or kv_map.keys()[0]) as sock:
+            for i,(key,val) in enumerate(items):
+                if serialize:
+                    flags, val = self._serialize(val)
+                else:
+                    flags = 0
+                if (sys.getsizeof(val) > self.max_value_size) or (len(key) > MAX_KEY_SIZE):
+                    failure_list.append(key)
+                if i == last_index:
+                    socksend(sock, last_socket_fn(key, val, i, expire, flags))
+                else:
+                    socksend(sock, socket_fn(key, val, i, expire, flags))
+            while 1:
+                (magic, opcode, keylen, extlen, datatype, status, bodylen, opaque,
+                        cas, extra) = sockresponse(sock)
+                if status != R._no_error:
+                    if failure_test(status):
+                        failure_list.append(kv_map.keys()[opaque])
+                    else:
+                        raise MemcachedError("%d: %s" % (status, extra))
+                if opaque == last_index: # last item!
+                    break
+
     def _smulti_helper(self, kvmap, expire, hashkey, socket_fn, last_socket_fn, failure_test):
         """
             helper for "multi_set-like" commands
         """
-        def per_host_fn(sisters_map, failure_list, hashkey=None):
-            items = sisters_map.items()
-            last_i = len(items)-1
-
-            oversized_items = []
-            for item in items:
-                if sys.getsizeof(item) > self.max_value_size:
-                    oversized_items.append(item)
-            for item in oversized_items:
-                failure_list.append(item[0])
-                items.remove(item)
-            with self.sock4key(hashkey or items[0][0]) as sock:
-                for i,(key,val) in enumerate(items):
-                    flags, val = self._serialize(val)
-                    if i == last_i:
-                        socksend(sock, last_socket_fn(key, val, i,
-                                expire, flags))
-                    else:
-                        socksend(sock, socket_fn(key, val, i,
-                                expire, flags))
-                while 1:
-                    (magic, opcode, keylen, extlen, datatype, status, bodylen, opaque,
-                            cas, extra) = sockresponse(sock)
-                    if failure_test(status):
-                        failure_list.append(items[opaque][0])
-                    if opaque == last_i: # last item!
-                        break
         failures = []
-
         if hashkey:
             # user is forcing everything to one shard
             groups = [kvmap]
@@ -507,10 +503,56 @@ class Client(object):
             groups = hash_groups.values()
 
         for g in groups:
-            self.threadpool.add_task(per_host_fn, g, failures, hashkey=hashkey)
+            self.threadpool.add_task(self._per_host_smulti, g, failures, expire, socket_fn, last_socket_fn, failure_test, hashkey=hashkey)
         self.threadpool.wait()
 
         return failures
+
+    @connpool.instance_reconnect
+    def _per_host_delete(self, items, failure_list, hashkey=None):
+        last_i = len(items)-1
+        with self.sock4key(hashkey or items[0]) as sock:
+            for i,key in enumerate(items):
+                if i == last_i:
+                    socksend(sock, _gd(M._delete, key, i, 0))
+                else:
+                    socksend(sock, _gd(M._deleteq, key, i, 0))
+            while 1:
+                (_, _, _, _, _, status, _, opaque, _, _) = sockresponse(sock)
+                if status != R._no_error:
+                    failure_list.append(items[opaque])
+                if opaque == last_i: # last item!
+                    break
+
+    @connpool.instance_reconnect
+    def _per_host_stats(self, cpool, rmap):
+        host_stats = {}
+        with connpool.pooled_connection(cpool) as sock:
+            socksend(sock, _qnsv(M._stat))
+            while 1:
+                (_, _, keylen, _, _, status, bodylen, _, _, extra) = sockresponse(sock)
+                if status != R._no_error:
+                    raise MemcachedError("%d: %s" % (status, extra))
+                if keylen == 0: # last response?
+                    host_key = "%s:%s" % sock.getpeername()
+                    rmap[host_key] = host_stats
+                    break
+                else:
+                    key, value = struct.unpack('!%ds%ds' % (keylen, (bodylen-keylen)), extra)
+                    host_stats[key] = value
+
+    @connpool.instance_reconnect
+    def _per_host_version(self, cpool, rmap):
+        with connpool.pooled_connection(cpool) as sock:
+            socksend(sock, _qnsv(M._version))
+            (_, _, keylen, _, _, status, bodylen, _, _, extra) = sockresponse(sock)
+
+            if status != R._no_error:
+                raise MemcachedError("%d: %s" % (status, extra))
+
+            version_string = struct.unpack('!%ds' % ((bodylen-keylen), ), extra)[0]
+            host_key = "%s:%s" % sock.getpeername()
+            rmap[host_key] = version_string
 
     def get(self, key, cas=False):
         """
@@ -524,7 +566,7 @@ class Client(object):
         """
         socket_fn = lambda key: _gd(M._get, key, 0, 0)
         failure_test = lambda status: status == R._key_not_found
-        return self._g_helper(key, socket_fn, failure_test, return_cas=cas)
+        return self._per_host_g(key, socket_fn, failure_test, return_cas=cas)
 
     def get_multi(self, keys, hashkey=None):
         """
@@ -550,8 +592,8 @@ class Client(object):
         True
         """
         socket_fn = lambda key,val,expire,flags: _s(M._set, key, val, 0, expire, cas, flags)
-        failure_test = lambda status: status == R._items_not_stored or status == R._key_exists
-        return self._s_helper(key, val, expire, socket_fn, failure_test)
+        failure_test = lambda status: status in (R._items_not_stored, R._key_exists, R._invalid_arguments, R._value_too_large)
+        return self._per_host_s(key, val, expire, socket_fn, failure_test)
 
     def set_multi(self, kvmap, expire=0, hashkey=None):
         """
@@ -567,7 +609,6 @@ class Client(object):
         failure_test = lambda status: status != R._no_error
         return self._smulti_helper(kvmap, expire, hashkey, socket_fn, last_socket_fn, failure_test)
 
-
     def add(self, key, val, expire=0, cas=0):
         """
         The add command sets a single key.
@@ -582,9 +623,8 @@ class Client(object):
         False
         """
         socket_fn = lambda key,val,expire,flags: _s(M._add, key, val, 0, expire, cas, flags)
-        failure_test = lambda status: status == R._key_exists or status == R._key_exists
-        return self._s_helper(key, val, expire, socket_fn, failure_test)
-
+        failure_test = lambda status: status == R._key_exists
+        return self._per_host_s(key, val, expire, socket_fn, failure_test)
 
     def add_multi(self, kvmap, expire=0, hashkey=None):
         """
@@ -602,7 +642,6 @@ class Client(object):
         failure_test = lambda status: status != R._no_error
         return self._smulti_helper(kvmap, expire, hashkey, socket_fn, last_socket_fn, failure_test)
 
-
     def replace(self, key, val, expire=0, cas=0):
         """
         The replace command replaces a single key.
@@ -618,7 +657,7 @@ class Client(object):
         """
         socket_fn = lambda key,val,expire,flags: _s(M._replace, key, val, 0, expire, cas, flags)
         failure_test = lambda status: status == R._key_not_found or status == R._key_exists
-        return self._s_helper(key, val, expire, socket_fn, failure_test)
+        return self._per_host_s(key, val, expire, socket_fn, failure_test)
 
     def replace_multi(self, kvmap, expire=0, hashkey=None):
         """
@@ -653,10 +692,9 @@ class Client(object):
         """
         socket_fn = lambda key: _gd(M._delete, key, 0, cas)
         failure_test = lambda status: status == R._key_not_found or status == R._key_exists
-        rval = self._g_helper(key, socket_fn, failure_test, unpack=False)
+        rval = self._per_host_g(key, socket_fn, failure_test, unpack=False)
         return rval or False
 
-    @connpool.instance_reconnect
     def delete_multi(self, keys, hashkey=None):
         """
         The delete_multi command removes the value for each key
@@ -672,20 +710,6 @@ class Client(object):
         >>> c.delete_multi(['l', 'k'])
         ['l', 'k']
         """
-        def per_host_delete(items, failure_list, hashkey=None):
-            last_i = len(items)-1
-            with self.sock4key(hashkey or items[0]) as sock:
-                for i,key in enumerate(items):
-                    if i == last_i:
-                        socksend(sock, _gd(M._delete, key, i, 0))
-                    else:
-                        socksend(sock, _gd(M._deleteq, key, i, 0))
-                while 1:
-                    (_, _, _, _, _, status, _, opaque, _, _) = sockresponse(sock)
-                    if status != R._no_error:
-                        failure_list.append(items[opaque])
-                    if opaque == last_i: # last item!
-                        break
         failures = []
         if hashkey:
             # user is forcing everything to specific shard
@@ -700,7 +724,7 @@ class Client(object):
             groups = groups.values()
 
         for g in groups:
-            self.threadpool.add_task(per_host_delete, g, failures, hashkey=hashkey)
+            self.threadpool.add_task(self._per_host_delete, g, failures, hashkey=hashkey)
         self.threadpool.wait()
 
         return failures
@@ -770,7 +794,7 @@ class Client(object):
         """
         socket_fn = lambda key,val,expire,flags: _ap(M._append, key, val, 0, 0)
         failure_test = lambda status: status == R._items_not_stored
-        return self._s_helper(key, val, 0, socket_fn, failure_test, serialize=False)
+        return self._per_host_s(key, val, 0, socket_fn, failure_test, serialize=False)
 
     def prepend(self, key, val):
         """
@@ -787,7 +811,7 @@ class Client(object):
         """
         socket_fn = lambda key,val,expire,flags: _ap(M._prepend, key, val, 0, 0)
         failure_test = lambda status: status == R._items_not_stored
-        return self._s_helper(key, val, 0, socket_fn, failure_test, serialize=False)
+        return self._per_host_s(key, val, 0, socket_fn, failure_test, serialize=False)
 
     @connpool.instance_reconnect
     def quit(self):
@@ -805,6 +829,18 @@ class Client(object):
                 if status != R._no_error:
                     raise MemcachedError("%d: %s" % (status, extra))
         return True
+
+    def close(self):
+        """
+        Close the connections to all servers.
+
+        >>> c = Client('localhost:11211')
+        >>> c.close()
+        """
+        self.quit()
+        for r in self.hash.all_nodes():
+            with connpool.pooled_connection(r) as sock:
+                sock.close()
 
     @connpool.instance_reconnect
     def flush_all(self, expire=0):
@@ -833,24 +869,9 @@ class Client(object):
         {...
         """
         host_stats_map = {}
-        def per_host_stats(sock, rmap):
-            host_stats = {}
-            socksend(sock, _qnsv(M._stat))
-            while 1:
-                (_, _, keylen, _, _, status, bodylen, _, _, extra) = sockresponse(sock)
-
-                if status != R._no_error:
-                    raise MemcachedError("%d: %s" % (status, extra))
-                if keylen == 0: # last response?
-                    host_key = "%s:%s" % sock.getpeername()
-                    rmap[host_key] = host_stats
-                    break
-                else:
-                    key, value = struct.unpack('!%ds%ds' % (keylen, (bodylen-keylen)), extra)
-                    host_stats[key] = value
 
         for sock in self.hash.all_nodes():
-            self.threadpool.add_task(per_host_stats, sock, host_stats_map)
+            self.threadpool.add_task(self._per_host_stats, sock, host_stats_map)
         self.threadpool.wait()
 
         return host_stats_map
@@ -873,7 +894,6 @@ class Client(object):
                     raise MemcachedError("%d: %s" % (status, extra))
         return True
 
-    @connpool.instance_reconnect
     def version(self):
         """
         The version command returns the server's version string.
@@ -883,26 +903,14 @@ class Client(object):
         {'...
         """
         host_version_map = {}
-        def per_host_version(sock, rmap):
-            socksend(sock, _qnsv(M._version))
-            (_, _, keylen, _, _, status, bodylen, _, _, extra) = sockresponse(sock)
-
-            if status != R._no_error:
-                raise MemcachedError("%d: %s" % (status, extra))
-
-            version_string = struct.unpack('!%ds' % ((bodylen-keylen), ), extra)[0]
-            host_key = "%s:%s" % sock.getpeername()
-            rmap[host_key] = version_string
 
         for r in self.hash.all_nodes():
-            with connpool.pooled_connection(r) as sock:
-                self.threadpool.add_task(per_host_version, sock, host_version_map)
+            self.threadpool.add_task(self._per_host_version, r, host_version_map)
         self.threadpool.wait()
 
         return host_version_map
 
 if __name__ == "__main__":
-    # import doctest
-    # doctest.testmod()
-    c = Client("localhost:11211")
-    c.set('keyhere', 'a'*10000000)
+    import doctest
+    doctest.testmod()
+

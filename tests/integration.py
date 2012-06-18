@@ -50,7 +50,7 @@ class TestQuitNoop(BaseTest):
         """test quit command"""
         assert self.client.quit() == True
         # this is a terribly weak test. we can't assert the following
-        # because of the new retry logic. 
+        # because of the new retry logic.
         # self.assertRaises(pymemc.MemcachedError, self.client.quit)
 
     def testNoop(self):
@@ -89,8 +89,7 @@ class TestGetSetDelete(BaseTest):
         oversized_key = self.random_str(length=1000)
         normal_val = self.random_str(length=1000)
 
-        self.assertRaises(pymemc.MemcachedError, self.client.set,
-            oversized_key, normal_val)
+        self.assertFalse(self.client.set(oversized_key, normal_val))
 
     def testSetOversizeValue(self):
         """test oversize values"""
@@ -120,11 +119,19 @@ class TestGetSetDelete(BaseTest):
             assert self.client.get(key) == None
 
     def testGetRetry(self):
+        """test that a simple get succeeds even after the server has gone away"""
         sample_data = self.get_sample_data(length=100)
-                
+
+        for key, val in sample_data.iteritems():
+            assert self.client.set(key, val) == True
+        
         self.mc.kill()
         self.mc = subprocess.Popen(['memcached'], stderr=subprocess.STDOUT, stdout=subprocess.PIPE)
         time.sleep(1)
+        
+        for key in sample_data.iterkeys():
+            assert self.client.get(key) == None
+            
         for key, val in sample_data.iteritems():
             assert self.client.set(key, val) == True
 
@@ -189,6 +196,7 @@ class TestIncrementDecrement(BaseTest):
             assert self.client.incr(key, delta=random_delta) == intval+1+random_delta
 
     def testDecrement(self):
+        """test basic decrement"""
         int_sample_data = dict(zip(map(str, xrange(100,200)), xrange(100,200)))
         random_delta = random.randint(1,10)
         for key,intval in int_sample_data.iteritems():
@@ -266,6 +274,38 @@ class TestMultiGetSetDelete(BaseTest):
         sample_data[normal_key] = oversized_val
         assert set(self.client.set_multi(sample_data)) == set([normal_key])
 
+    def testMultiGetRetry(self):
+        """test multigets after the server goes away"""
+        sample_data = self.get_sample_data(length=100)
+        assert self.client.set_multi(sample_data) == []
+
+        self.mc.kill()
+        self.mc = subprocess.Popen(['memcached'], stderr=subprocess.STDOUT, stdout=subprocess.PIPE)
+        time.sleep(1)
+
+        sample_data = self.get_sample_data(length=100)
+        assert self.client.set_multi(sample_data) == []
+
+        rval = self.client.get_multi(sample_data.keys())
+        for key, val in sample_data.iteritems():
+            assert rval[key] == val
+
+    def testMultiSetRetry(self):
+        """test multisets after the server goes away"""
+        sample_data = self.get_sample_data(length=100)
+        assert self.client.set_multi(sample_data) == []
+
+        self.mc.kill()
+        self.mc = subprocess.Popen(['memcached'], stderr=subprocess.STDOUT, stdout=subprocess.PIPE)
+        time.sleep(1)
+
+        sample_data = self.get_sample_data(length=100)
+        assert self.client.set_multi(sample_data) == []
+
+        for key, val in sample_data.iteritems():
+            rval = self.client.get(key)
+            assert rval == val, "rval:"+str(rval)
+
 class TestMultiAddReplace(BaseTest):
     def testReplaceMulti(self):
         """test simple multireplaces"""
@@ -290,7 +330,7 @@ class TestMultiAddReplace(BaseTest):
 
     def testAddMulti(self):
         """test simple multiadds"""
-        sample_data = self.get_sample_data(length=100)
+        sample_data = self.get_sample_data(length=2)
 
         assert self.client.add_multi(sample_data) == []
 
