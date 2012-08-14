@@ -534,7 +534,7 @@ class Client(object):
                 if status != R._no_error:
                     raise MemcachedError("%d: %s" % (status, extra))
                 if keylen == 0: # last response?
-                    host_key = "%s:%s" % sock.getpeername()
+                    host_key = tuple(sock.getpeername())
                     rmap[host_key] = host_stats
                     break
                 else:
@@ -551,7 +551,7 @@ class Client(object):
                 raise MemcachedError("%d: %s" % (status, extra))
 
             version_string = struct.unpack('!%ds' % ((bodylen-keylen), ), extra)[0]
-            host_key = "%s:%s" % sock.getpeername()
+            host_key = tuple(sock.getpeername())
             rmap[host_key] = version_string
 
     def get(self, key, cas=False):
